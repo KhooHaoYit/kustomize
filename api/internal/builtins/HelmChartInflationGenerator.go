@@ -159,6 +159,39 @@ func (p *HelmChartInflationGeneratorPlugin) absChartHome() string {
 	return chartHome
 }
 
+func (p *HelmChartInflationGeneratorPlugin) runHelmCommandWithWorkingDirectory(
+	args []string,
+	workingDirectory string,
+) ([]byte, error) {
+	stdout := new(bytes.Buffer)
+	stderr := new(bytes.Buffer)
+	cmd := exec.Command(p.h.GeneralConfig().HelmConfig.Command, args...)
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+	cmd.Dir = workingDirectory
+	env := []string{
+		fmt.Sprintf("HELM_CONFIG_HOME=%s", p.ConfigHome),
+		fmt.Sprintf("HELM_CACHE_HOME=%s/.cache", p.ConfigHome),
+		fmt.Sprintf("HELM_DATA_HOME=%s/.data", p.ConfigHome)}
+	cmd.Env = append(os.Environ(), env...)
+	err := cmd.Run()
+	errorOutput := stderr.String()
+	if slices.Contains(args, "--debug") {
+		errorOutput = " Helm stack trace:\n" + errorOutput + "\nHelm template:\n" + stdout.String() + "\n"
+	}
+	if err != nil {
+		helm := p.h.GeneralConfig().HelmConfig.Command
+		//nolint:govet
+		err = errors.WrapPrefixf(
+			fmt.Errorf(
+				"unable to run: '%s %s' with env=%s (is '%s' installed?): %w",
+				helm, strings.Join(args, " "), env, helm, err),
+			errorOutput,
+		)
+	}
+	return stdout.Bytes(), err
+}
+
 func (p *HelmChartInflationGeneratorPlugin) runHelmCommand(
 	args []string) ([]byte, error) {
 	stdout := new(bytes.Buffer)
@@ -272,7 +305,12 @@ func (p *HelmChartInflationGeneratorPlugin) Generate() (rm resmap.ResMap, err er
 	if err = p.checkHelmVersion(); err != nil {
 		return nil, err
 	}
-	if path, exists := p.chartExistsLocally(); !exists {
+	path, isLocalChart := p.chartExistsLocally()
+	if isLocalChart {
+		if _, err := p.runHelmCommandWithWorkingDirectory(p.dependencyBuildCommand(), path); err != nil {
+			return nil, err
+		}
+	} else {
 		if p.Repo == "" {
 			return nil, fmt.Errorf(
 				"no repo specified for pull, no chart found at '%s'", path)
@@ -315,6 +353,14 @@ func (p *HelmChartInflationGeneratorPlugin) Generate() (rm resmap.ResMap, err er
 		return rm, nil
 	}
 	return nil, fmt.Errorf("could not parse bytes into resource map: %w", resMapErr)
+}
+
+func (p *HelmChartInflationGeneratorPlugin) dependencyBuildCommand() []string {
+	args := []string{
+		"dependency",
+		"build",
+	}
+	return args
 }
 
 func (p *HelmChartInflationGeneratorPlugin) pullCommand() []string {
